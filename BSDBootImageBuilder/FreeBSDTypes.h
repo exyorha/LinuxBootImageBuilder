@@ -1,0 +1,21 @@
+#ifndef FREEBSD_TYPES__H
+#define FREEBSD_TYPES__H
+
+#include <stdint.h>
+
+enum : uint32_t {
+	MODINFO_END       = 0,
+	MODINFO_NAME      = 1,
+	MODINFO_TYPE      = 2,
+	MODINFO_ADDR      = 3,
+	MODINFO_SIZE      = 4,
+	MODINFO_METADATA  = 0x8000,
+	MODINFOMD_ENVP    = 0x0006,
+	MODINFOMD_HOWTO   = 0x0007,
+	MODINFOMD_KERNEND = 0x0008,
+	MODINFOMD_DTBP    = 0x1002,
+
+	KERNEL_VADDR = 0xC0000000
+};
+
+#endif
