@@ -38,6 +38,7 @@ public:
 	std::vector<Module> modules;
 	uint32_t imageBase;
 	std::string kickstart;
+	std::vector<std::string> initModules;
 
 private:
 	struct ParsingContext {

@@ -133,7 +133,7 @@ void Blueprint::processLine(std::vector<std::string> &&line, ParsingContext &ctx
 
 	auto it = line.begin() + 1;
 	auto end = line.end();
-	
+
 	switch (ctx.state) {
 	case ParsingContext::StateRoot:
 		if (controlToken == "MODULE") {
@@ -175,6 +175,12 @@ void Blueprint::processLine(std::vector<std::string> &&line, ParsingContext &ctx
 			}
 
 			kickstart = std::move(*it++);
+		} else if(controlToken == "INIT") {
+			if (it == end) {
+				throw std::runtime_error("File name expected");
+			}
+
+			initModules.emplace_back(std::move(*it++));
 		}
 		else {
 			std::stringstream error;
@@ -226,7 +232,7 @@ void Blueprint::processLine(std::vector<std::string> &&line, ParsingContext &ctx
 		}
 		else if (controlToken == "SET") {
 			auto &metadata = modules.back().metadata.back();
-			
+
 			metadata.keyValuePairs.emplace_back();
 			auto &value = metadata.keyValuePairs.back();
 

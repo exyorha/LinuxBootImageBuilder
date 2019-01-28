@@ -42,7 +42,9 @@ private:
 	void alignAllocationPointer(uint32_t alignment);
 
 	template<typename T>
-	void processKickstartRelocations(const std::vector<T> &relocations);
+	void processImageRelocations(std::vector<unsigned char> &image, uint32_t base, const std::vector<T> &relocations);
+
+	void loadExecutable(const std::string &executable, std::vector<unsigned char> &image, uint32_t &entry);
 
 	static const std::unordered_map<std::string, ModuleTypeInfo> m_moduleTypes;
 

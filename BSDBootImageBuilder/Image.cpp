@@ -191,7 +191,7 @@ void Image::build(Blueprint &blueprint) {
 
 				writeMetadata32(MODINFO_METADATA | MODINFOMD_ENVP, envBase - m_kernelDelta);
 			}
-				break;
+			break;
 
 			case ModuleMetadataType::HOWTO:
 				writeMetadata32(MODINFO_METADATA | MODINFOMD_HOWTO, std::stoul(metadata.singleValue));
@@ -298,19 +298,67 @@ void Image::build(Blueprint &blueprint) {
 
 	m_image = std::move(outputBuffer);
 
-	m_kickstartBase = m_allocationPointer;
 
 	printf("Kickstart executable: %s\n", blueprint.kickstart.c_str());
 
+	m_kickstartBase = m_allocationPointer;
+	loadExecutable(blueprint.kickstart, m_kickstart, m_kickstartEntry);
+
+	auto kickstartInfo = reinterpret_cast<uint32_t *>(m_kickstart.data());
+	kickstartInfo[0] = m_metadataBase - m_kernelDelta;
+	kickstartInfo[1] = m_kernelEntryPoint + m_kernelDelta;
+	kickstartInfo[2] = m_imageBase + m_imageDisplacement;
+	kickstartInfo[3] = m_imageBase;
+	
+	if (blueprint.initModules.empty()) {
+		kickstartInfo[4] = 0;
+	}
+	else {
+		alignAllocationPointer(4);
+
+		auto moduleTable = m_allocationPointer;
+		kickstartInfo[4] = moduleTable;
+
+		m_kickstart.resize(m_allocationPointer - m_kickstartBase + sizeof(uint32_t) * (blueprint.initModules.size() + 1));
+
+		m_allocationPointer += sizeof(uint32_t) * (blueprint.initModules.size() + 1);
+
+		size_t index = 0;
+		for (const auto &initModule : blueprint.initModules) {
+			std::vector<unsigned char> imageData;
+
+			alignAllocationPointer(8);
+			auto moduleBase = m_allocationPointer;
+			uint32_t imageEntry;
+			loadExecutable(initModule, imageData, imageEntry);
+
+			auto moduleLimit = m_allocationPointer;
+
+			printf("Module %s: at %08X, limit %08X, entry %08X\n", initModule.c_str(), moduleBase, moduleLimit, imageEntry);
+
+			m_kickstart.resize(moduleLimit - m_kickstartBase);
+			std::copy(imageData.begin(), imageData.end(), m_kickstart.begin() + (moduleBase - m_kickstartBase));
+
+			reinterpret_cast<uint32_t *>(m_kickstart.data() + moduleTable - m_kickstartBase)[index] = imageEntry;
+			index++;
+		}
+
+		reinterpret_cast<uint32_t *>(m_kickstart.data() + moduleTable - m_kickstartBase)[index] = 0;
+	}
+
+}
+
+void Image::loadExecutable(const std::string &executable, std::vector<unsigned char> &image, uint32_t &entry) {
 	std::ifstream fileStream;
 	fileStream.exceptions(std::ios::failbit | std::ios::eofbit | std::ios::badbit);
-	fileStream.open(blueprint.kickstart, std::ios::in | std::ios::binary);
+	fileStream.open(executable, std::ios::in | std::ios::binary);
 
 	Elf32_Ehdr ehdr;
 	fileStream.read(reinterpret_cast<char *>(&ehdr), sizeof(ehdr));
 
-	uint32_t limit = m_kickstartBase;
-	uint32_t allocationLimit = m_kickstartBase;
+	uint32_t base = m_allocationPointer;
+	uint32_t limit = m_allocationPointer;
+	uint32_t allocationLimit = m_allocationPointer;
 
 	if (memcmp(ehdr.e_ident, ElfIdentification, EI_PAD) != 0 ||
 		ehdr.e_type != ET_EXEC ||
@@ -319,7 +367,7 @@ void Image::build(Blueprint &blueprint) {
 		ehdr.e_phentsize != sizeof(Elf32_Phdr))
 		throw std::runtime_error("Bad ELF identification");
 
-	m_kickstartEntry = ehdr.e_entry;
+	entry = ehdr.e_entry + base;
 
 	std::vector<Elf32_Phdr> phdr(ehdr.e_phnum);
 
@@ -328,29 +376,23 @@ void Image::build(Blueprint &blueprint) {
 
 	for (const auto &segment : phdr) {
 		if (segment.p_type == PT_LOAD) {
-			auto physaddr = segment.p_paddr + m_kickstartBase;
+			auto physaddr = segment.p_paddr + base;
 
 			allocationLimit = std::max<uint32_t>(limit, physaddr + segment.p_memsz);
 			limit = std::max<uint32_t>(limit, physaddr + segment.p_filesz);
-			if (m_kickstart.size() < limit - m_kickstartBase) {
-				m_kickstart.resize(limit - m_kickstartBase);
+			if (image.size() < limit - base) {
+				image.resize(limit - base);
 			}
 
 			if (segment.p_filesz > 0) {
 				fileStream.seekg(segment.p_offset);
-				fileStream.read(reinterpret_cast<char *>(m_kickstart.data() + physaddr - m_kickstartBase), segment.p_filesz);
+				fileStream.read(reinterpret_cast<char *>(image.data() + physaddr - base), segment.p_filesz);
 			}
 		}
 	}
 
-	uint32_t kickstartSize = allocationLimit - m_kickstartBase;
-	printf("Kickstart at %08X, size %08X\n", m_kickstartBase, kickstartSize);
-
-	auto kickstartInfo = reinterpret_cast<uint32_t *>(m_kickstart.data());
-	kickstartInfo[0] = m_metadataBase - m_kernelDelta;
-	kickstartInfo[1] = m_kernelEntryPoint + m_kernelDelta;
-	kickstartInfo[2] = m_imageBase + m_imageDisplacement;
-	kickstartInfo[3] = m_imageBase;
+	uint32_t kickstartSize = allocationLimit - base;
+	printf("Kickstart module at %08X, size %08X\n", base, kickstartSize);
 
 	std::vector<Elf32_Shdr> shdr(ehdr.e_shnum);
 
@@ -366,7 +408,7 @@ void Image::build(Blueprint &blueprint) {
 			std::vector<Elf32_Rel> relocations(section.sh_size / sizeof(Elf32_Rel));
 			fileStream.seekg(section.sh_offset);
 			fileStream.read(reinterpret_cast<char *>(relocations.data()), relocations.size() * sizeof(Elf32_Rel));
-			processKickstartRelocations(relocations);
+			processImageRelocations(image, base, relocations);
 		}
 		else if (section.sh_type == SHT_RELA) {
 			if ((section.sh_entsize != sizeof(Elf32_Rela) || (section.sh_size % sizeof(Elf32_Rela)) != 0)) {
@@ -376,7 +418,7 @@ void Image::build(Blueprint &blueprint) {
 			std::vector<Elf32_Rela> relocations(section.sh_size / sizeof(Elf32_Rela));
 			fileStream.seekg(section.sh_offset);
 			fileStream.read(reinterpret_cast<char *>(relocations.data()), relocations.size() * sizeof(Elf32_Rela));
-			processKickstartRelocations(relocations);
+			processImageRelocations(image, base, relocations);
 		}
 	}
 
@@ -385,11 +427,11 @@ void Image::build(Blueprint &blueprint) {
 }
 
 template<typename T>
-void Image::processKickstartRelocations(const std::vector<T> &relocations) {
+void Image::processImageRelocations(std::vector<unsigned char> &image, uint32_t base, const std::vector<T> &relocations) {
 	for (const auto &reloc : relocations) {
 		switch (ELF32_R_TYPE(reloc.r_info)) {
 		case R_ARM_ABS32:
-			*reinterpret_cast<uint32_t *>(m_kickstart.data() + reloc.r_offset) += m_kickstartBase;
+			*reinterpret_cast<uint32_t *>(image.data() + reloc.r_offset) += base;
 			break;
 
 		case R_ARM_REL32:
@@ -484,7 +526,7 @@ void Image::writeElf(std::ostream &stream) {
 	ehdr.e_type = ET_EXEC;
 	ehdr.e_machine = EM_ARM;
 	ehdr.e_version = EV_CURRENT;
-	ehdr.e_entry = m_kickstartBase + m_kickstartEntry;
+	ehdr.e_entry = m_kickstartEntry;
 	ehdr.e_phoff = sizeof(ehdr);
 	ehdr.e_ehsize = sizeof(ehdr);
 	ehdr.e_phentsize = sizeof(Elf32_Phdr);
