@@ -21,13 +21,13 @@ int main(int argc, char *argv[]) {
 	}
 
 	Image image;
-	//try {
+	try {
 		image.build(blueprint);
-	//} 
-	//catch (const std::exception &e) {
-	//	fprintf(stderr, "Image building failed: %s\n", e.what());
-	//	return 1;
-	//}
+	}
+	catch (const std::exception &e) {
+		fprintf(stderr, "Image building failed: %s\n", e.what());
+		return 1;
+	}
 
 	image.writeElf(argv[1]);
 

@@ -50,7 +50,7 @@ void Image::build(Blueprint &blueprint) {
 			error << "Unknown module type '" << mod.type << "'";
 			throw std::runtime_error(error.str());
 		}
-		
+
 		auto &info = infoIt->second;
 		if (info.type == ModuleType::ElfKernel) {
 			alignAllocationPointer(0x00100000); // Kernel base must be aligned to 1MiB
@@ -225,7 +225,7 @@ void Image::build(Blueprint &blueprint) {
 		fixup.handler(reinterpret_cast<uint8_t *>(m_image.data() + m_metadataBase - m_imageBase + fixup.offset * sizeof(uint32_t)));
 	}
 
-	std::vector<unsigned char> outputBuffer(m_image.size());
+	std::vector<unsigned char> outputBuffer(m_image.size() + 4096);
 	size_t outputBufferUsed = 0;
 
 	{
@@ -235,7 +235,7 @@ void Image::build(Blueprint &blueprint) {
 		memset(&prefs, 0, sizeof(prefs));
 		prefs.frameInfo.blockMode = LZ4F_blockIndependent;
 		prefs.compressionLevel = LZ4HC_CLEVEL_MAX;
-		
+
 		LZ4F_compressOptions_t opts;
 		memset(&opts, 0, sizeof(opts));
 		opts.stableSrc = 1;
@@ -253,7 +253,7 @@ void Image::build(Blueprint &blueprint) {
 		);
 
 		if (LZ4F_isError(chunk)) {
-			throw std::runtime_error("LZ4F_compressBegin failed\n");
+			throw std::runtime_error(LZ4F_getErrorName(chunk));
 		}
 
 		outputBufferUsed += chunk;
@@ -268,7 +268,7 @@ void Image::build(Blueprint &blueprint) {
 		);
 
 		if (LZ4F_isError(chunk)) {
-			throw std::runtime_error("LZ4F_compressBegin failed\n");
+			throw std::runtime_error(LZ4F_getErrorName(chunk));
 		}
 
 		outputBufferUsed += chunk;
@@ -281,7 +281,7 @@ void Image::build(Blueprint &blueprint) {
 		);
 
 		if (LZ4F_isError(chunk)) {
-			throw std::runtime_error("LZ4F_compressEnd failed\n");
+			throw std::runtime_error(LZ4F_getErrorName(chunk));
 		}
 
 		outputBufferUsed += chunk;
@@ -289,7 +289,7 @@ void Image::build(Blueprint &blueprint) {
 	}
 
 	outputBuffer.resize(outputBufferUsed);
-	
+
 	m_imageDisplacement = m_image.size() - outputBuffer.size();
 
 	printf("Compressed image at %08X, %08X bytes (%u%% of original)\n",
@@ -305,7 +305,7 @@ void Image::build(Blueprint &blueprint) {
 	std::ifstream fileStream;
 	fileStream.exceptions(std::ios::failbit | std::ios::eofbit | std::ios::badbit);
 	fileStream.open(blueprint.kickstart, std::ios::in | std::ios::binary);
-	
+
 	Elf32_Ehdr ehdr;
 	fileStream.read(reinterpret_cast<char *>(&ehdr), sizeof(ehdr));
 
@@ -392,11 +392,13 @@ void Image::processKickstartRelocations(const std::vector<T> &relocations) {
 			*reinterpret_cast<uint32_t *>(m_kickstart.data() + reloc.r_offset) += m_kickstartBase;
 			break;
 
-		case R_ARM_THM_CALL:
+		case R_ARM_REL32:
 		case R_ARM_CALL:
-		case R_ARM_THM_JUMP24:
 			break;
 
+		case R_ARM_PREL31:
+			break;
+		
 		default:
 		{
 			std::stringstream error;
@@ -475,7 +477,7 @@ void Image::writeElf(std::ostream &stream) {
 	kickstartPhdr.p_memsz = m_allocationPointer - m_kickstartBase;
 	kickstartPhdr.p_flags = PF_R | PF_W | PF_X;
 	kickstartPhdr.p_align = 4096;
-	
+
 	Elf32_Ehdr ehdr;
 	memset(&ehdr, 0, sizeof(ehdr));
 	memcpy(ehdr.e_ident, ElfIdentification, sizeof(ElfIdentification));
