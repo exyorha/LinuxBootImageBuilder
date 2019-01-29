@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <unordered_map>
 
-Blueprint::Blueprint() {
+Blueprint::Blueprint() : compress(false) {
 
 }
 
@@ -181,6 +181,8 @@ void Blueprint::processLine(std::vector<std::string> &&line, ParsingContext &ctx
 			}
 
 			initModules.emplace_back(std::move(*it++));
+		} else if(controlToken == "COMPRESS") {
+			compress = true;
 		}
 		else {
 			std::stringstream error;

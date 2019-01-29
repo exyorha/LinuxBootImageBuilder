@@ -39,6 +39,7 @@ public:
 	uint32_t imageBase;
 	std::string kickstart;
 	std::vector<std::string> initModules;
+	bool compress;
 
 private:
 	struct ParsingContext {

@@ -225,79 +225,82 @@ void Image::build(Blueprint &blueprint) {
 		fixup.handler(reinterpret_cast<uint8_t *>(m_image.data() + m_metadataBase - m_imageBase + fixup.offset * sizeof(uint32_t)));
 	}
 
-	std::vector<unsigned char> outputBuffer(m_image.size() + 4096);
-	size_t outputBufferUsed = 0;
+	if(blueprint.compress) {
+		std::vector<unsigned char> outputBuffer(m_image.size() + 4096);
+		size_t outputBufferUsed = 0;
 
-	{
-		LZ4F_cctx *rawCtx;
+		{
+			LZ4F_cctx *rawCtx;
 
-		LZ4F_preferences_t prefs;
-		memset(&prefs, 0, sizeof(prefs));
-		prefs.frameInfo.blockMode = LZ4F_blockIndependent;
-		prefs.compressionLevel = LZ4HC_CLEVEL_MAX;
+			LZ4F_preferences_t prefs;
+			memset(&prefs, 0, sizeof(prefs));
+			prefs.frameInfo.blockMode = LZ4F_blockIndependent;
+			prefs.compressionLevel = LZ4HC_CLEVEL_MAX;
 
-		LZ4F_compressOptions_t opts;
-		memset(&opts, 0, sizeof(opts));
-		opts.stableSrc = 1;
+			LZ4F_compressOptions_t opts;
+			memset(&opts, 0, sizeof(opts));
+			opts.stableSrc = 1;
 
-		if (LZ4F_createCompressionContext(&rawCtx, LZ4F_VERSION) != 0)
-			throw std::runtime_error("LZ4F_createCompressionContext failed");
+			if (LZ4F_createCompressionContext(&rawCtx, LZ4F_VERSION) != 0)
+				throw std::runtime_error("LZ4F_createCompressionContext failed");
 
-		std::unique_ptr<LZ4F_cctx, LZ4FDeleter> context(rawCtx);
+			std::unique_ptr<LZ4F_cctx, LZ4FDeleter> context(rawCtx);
 
-		auto chunk = LZ4F_compressBegin(
-			context.get(),
-			outputBuffer.data() + outputBufferUsed,
-			outputBuffer.size() - outputBufferUsed,
-			&prefs
-		);
+			auto chunk = LZ4F_compressBegin(
+				context.get(),
+				outputBuffer.data() + outputBufferUsed,
+				outputBuffer.size() - outputBufferUsed,
+				&prefs
+			);
 
-		if (LZ4F_isError(chunk)) {
-			throw std::runtime_error(LZ4F_getErrorName(chunk));
+			if (LZ4F_isError(chunk)) {
+				throw std::runtime_error(LZ4F_getErrorName(chunk));
+			}
+
+			outputBufferUsed += chunk;
+
+			chunk = LZ4F_compressUpdate(
+				context.get(),
+				outputBuffer.data() + outputBufferUsed,
+				outputBuffer.size() - outputBufferUsed,
+				m_image.data(),
+				m_image.size(),
+				&opts
+			);
+
+			if (LZ4F_isError(chunk)) {
+				throw std::runtime_error(LZ4F_getErrorName(chunk));
+			}
+
+			outputBufferUsed += chunk;
+
+			chunk = LZ4F_compressEnd(
+				context.get(),
+				outputBuffer.data() + outputBufferUsed,
+				outputBuffer.size() - outputBufferUsed,
+				&opts
+			);
+
+			if (LZ4F_isError(chunk)) {
+				throw std::runtime_error(LZ4F_getErrorName(chunk));
+			}
+
+			outputBufferUsed += chunk;
+
 		}
 
-		outputBufferUsed += chunk;
+		outputBuffer.resize(outputBufferUsed);
 
-		chunk = LZ4F_compressUpdate(
-			context.get(),
-			outputBuffer.data() + outputBufferUsed,
-			outputBuffer.size() - outputBufferUsed,
-			m_image.data(),
-			m_image.size(),
-			&opts
-		);
+		m_imageDisplacement = m_image.size() - outputBuffer.size();
 
-		if (LZ4F_isError(chunk)) {
-			throw std::runtime_error(LZ4F_getErrorName(chunk));
-		}
+		printf("Compressed image at %08X, %08X bytes (%u%% of original)\n",
+			m_imageBase + m_imageDisplacement,
+			outputBuffer.size(), outputBuffer.size() * 100 / m_image.size());
 
-		outputBufferUsed += chunk;
-
-		chunk = LZ4F_compressEnd(
-			context.get(),
-			outputBuffer.data() + outputBufferUsed,
-			outputBuffer.size() - outputBufferUsed,
-			&opts
-		);
-
-		if (LZ4F_isError(chunk)) {
-			throw std::runtime_error(LZ4F_getErrorName(chunk));
-		}
-
-		outputBufferUsed += chunk;
-
+		m_image = std::move(outputBuffer);
+	} else {
+		m_imageDisplacement = 0;
 	}
-
-	outputBuffer.resize(outputBufferUsed);
-
-	m_imageDisplacement = m_image.size() - outputBuffer.size();
-
-	printf("Compressed image at %08X, %08X bytes (%u%% of original)\n",
-		m_imageBase + m_imageDisplacement,
-		outputBuffer.size(), outputBuffer.size() * 100 / m_image.size());
-
-	m_image = std::move(outputBuffer);
-
 
 	printf("Kickstart executable: %s\n", blueprint.kickstart.c_str());
 
@@ -309,7 +312,7 @@ void Image::build(Blueprint &blueprint) {
 	kickstartInfo[1] = m_kernelEntryPoint + m_kernelDelta;
 	kickstartInfo[2] = m_imageBase + m_imageDisplacement;
 	kickstartInfo[3] = m_imageBase;
-	
+
 	if (blueprint.initModules.empty()) {
 		kickstartInfo[4] = 0;
 	}
@@ -440,7 +443,7 @@ void Image::processImageRelocations(std::vector<unsigned char> &image, uint32_t 
 
 		case R_ARM_PREL31:
 			break;
-		
+
 		default:
 		{
 			std::stringstream error;
