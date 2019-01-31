@@ -437,6 +437,7 @@ void Image::processImageRelocations(std::vector<unsigned char> &image, uint32_t 
 			*reinterpret_cast<uint32_t *>(image.data() + reloc.r_offset) += base;
 			break;
 
+		case R_ARM_THM_CALL:
 		case R_ARM_REL32:
 		case R_ARM_CALL:
 		case R_ARM_JUMP24:
