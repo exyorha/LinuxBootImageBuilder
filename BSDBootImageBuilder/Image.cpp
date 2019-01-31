@@ -439,6 +439,7 @@ void Image::processImageRelocations(std::vector<unsigned char> &image, uint32_t 
 
 		case R_ARM_REL32:
 		case R_ARM_CALL:
+		case R_ARM_JUMP24:
 			break;
 
 		case R_ARM_PREL31:

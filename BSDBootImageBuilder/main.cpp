@@ -16,7 +16,9 @@ int main(int argc, char *argv[]) {
 		blueprint.parse(argv[2]);
 	}
 	catch (const std::exception &e) {
+		fflush(stdout);
 		fprintf(stderr, "Parsing of blueprint file failed: %s\n", e.what());
+		fflush(stderr);
 		return 1;
 	}
 
@@ -25,7 +27,9 @@ int main(int argc, char *argv[]) {
 		image.build(blueprint);
 	}
 	catch (const std::exception &e) {
+		fflush(stdout);
 		fprintf(stderr, "Image building failed: %s\n", e.what());
+		fflush(stderr);
 		return 1;
 	}
 
