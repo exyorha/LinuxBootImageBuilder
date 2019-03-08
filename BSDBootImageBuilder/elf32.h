@@ -53,6 +53,7 @@ typedef uint32_t Elf32_Word;
 #define PT_SHLIB	5
 #define PT_PHDR		6
 #define PT_LOPROC	0x70000000
+#define SHT_ARM_EXIDX (PT_LOPROC + 1)
 #define PT_HIPROC	0x7fffffff
 
 #define PF_X		1
@@ -82,7 +83,7 @@ typedef uint32_t Elf32_Word;
 #define R_ARM_THM_MOVW_ABS_NC 47
 #define R_ARM_THM_MOVT_ABS 48
 
-typedef struct {
+struct Elf32_Ehdr {
 	unsigned char	e_ident[EI_NIDENT];
 	Elf32_Half		e_type;
 	Elf32_Half		e_machine;
@@ -97,9 +98,9 @@ typedef struct {
 	Elf32_Half		e_shentsize;
 	Elf32_Half		e_shnum;
 	Elf32_Half		e_shstrndx;
-} Elf32_Ehdr;
+};
 
-typedef struct {
+struct Elf32_Phdr {
 	Elf32_Word	p_type;
 	Elf32_Off	p_offset;
 	Elf32_Addr	p_vaddr;
@@ -108,9 +109,9 @@ typedef struct {
 	Elf32_Word	p_memsz;
 	Elf32_Word	p_flags;
 	Elf32_Word	p_align;
-} Elf32_Phdr;
+};
 
-typedef struct {
+struct Elf32_Shdr {
 	Elf32_Word	sh_name;
 	Elf32_Word	sh_type;
 	Elf32_Word	sh_flags;
@@ -121,7 +122,7 @@ typedef struct {
 	Elf32_Word	sh_info;
 	Elf32_Word	sh_addralign;
 	Elf32_Word	sh_entsize;
-} Elf32_Shdr;
+};
 
 typedef struct {
 	Elf32_Addr	r_offset;
@@ -134,8 +135,35 @@ typedef struct {
 	Elf32_Sword	r_addend;
 } Elf32_Rela;
 
+struct Elf32_Sym {
+	Elf32_Word st_name;
+	Elf32_Addr st_value;
+	Elf32_Word st_size;
+	unsigned char st_info;
+	unsigned char st_other;
+	Elf32_Half st_shndx;
+};
+
 #define ELF32_R_SYM(i) ((i) >> 8)
 #define ELF32_R_TYPE(i) ((unsigned char)(i))
 #define ELF32_R_INFO(s,t) (((s) << 8) | (unsigned char)(t))
+
+#define ELF32_ST_BIND(i) ((i) >> 4)
+#define ELF32_ST_TYPE(i) ((i) & 0x0F)
+#define ELF32_ST_INFO(b,t) (((b) << 4) | ((t) & 0x0F))
+
+#define STB_LOCAL 0
+#define STB_GLOBAL 1
+#define STB_WEAK 2
+#define STB_LOPROC 13
+#define STB_HIPROC 15
+
+#define STT_NOTYPE 0
+#define STT_OBJECT 1
+#define STT_FUNC 2
+#define STT_SECTION 3
+#define STT_FILE 4
+#define STT_LOPROC 13
+#define STT_HIPROC 15
 
 #endif

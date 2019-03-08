@@ -33,6 +33,26 @@ Image::~Image() {
 
 }
 
+void Image::writeSymbolSection(const Elf32_Shdr &section, uint32_t &esym, const std::vector<Elf32_Shdr> &sections, std::istream &fileStream) {
+	uint32_t size = section.sh_size;
+	
+	if (m_image.size() < esym + sizeof(size) + size) {
+		m_image.resize(esym + sizeof(size) + size - m_imageBase);
+	}
+
+	memcpy(m_image.data() + esym - m_imageBase, &size, sizeof(size));
+
+	fileStream.seekg(section.sh_offset);
+	fileStream.read(reinterpret_cast<char *>(m_image.data()) + esym + sizeof(size) - m_imageBase, section.sh_size);
+
+	esym = (esym + sizeof(size) + size + 3) & ~3;
+
+	if (section.sh_type == SHT_SYMTAB) {
+		writeSymbolSection(sections[section.sh_link], esym, sections, fileStream);
+	}
+
+}
+
 void Image::build(Blueprint &blueprint) {
 	m_imageBase = blueprint.imageBase;
 	m_allocationPointer = m_imageBase;
@@ -67,20 +87,34 @@ void Image::build(Blueprint &blueprint) {
 
 		switch (info.type) {
 		case ModuleType::ElfKernel:
+		case ModuleType::ElfModule:
 		{
 			Elf32_Ehdr ehdr;
 			fileStream.read(reinterpret_cast<char *>(&ehdr), sizeof(ehdr));
 
+			writeMetadata(MODINFO_METADATA | MODINFOMD_ELFHDR, &ehdr, sizeof(ehdr));
+
 			uint32_t limit = base;
 
 			if (memcmp(ehdr.e_ident, ElfIdentification, EI_PAD) != 0 ||
-				ehdr.e_type != ET_EXEC ||
+				(info.type == ModuleType::ElfKernel && ehdr.e_type != ET_EXEC) ||
+				(info.type == ModuleType::ElfModule && ehdr.e_type != ET_DYN) ||
 				ehdr.e_machine != EM_ARM ||
 				ehdr.e_version != EV_CURRENT ||
 				ehdr.e_phentsize != sizeof(Elf32_Phdr))
 				throw std::runtime_error("Bad ELF identification");
 
-			m_kernelEntryPoint = ehdr.e_entry;
+			uint32_t virtualBaseDelta;
+
+			if (info.type == ModuleType::ElfKernel) {
+				m_kernelEntryPoint = ehdr.e_entry;
+				virtualBaseDelta = 0;
+			}
+			else {
+				virtualBaseDelta = base - m_kernelDelta;
+				printf("elf module %s will have virtual base address %08X and physical base address %08X\n",
+					mod.name.c_str(), virtualBaseDelta, base);
+			}
 
 			std::vector<Elf32_Phdr> phdr(ehdr.e_phnum);
 
@@ -89,7 +123,9 @@ void Image::build(Blueprint &blueprint) {
 
 			for (const auto &segment : phdr) {
 				if (segment.p_type == PT_LOAD) {
-					auto physaddr = segment.p_vaddr + m_kernelDelta;
+					auto physaddr = segment.p_vaddr + virtualBaseDelta + m_kernelDelta;
+
+					printf("Segment physaddr: %08X, image base: %08X\n", physaddr, m_imageBase);
 
 					limit = std::max<uint32_t>(limit, physaddr + segment.p_memsz);
 					if (m_image.size() < limit - m_imageBase) {
@@ -100,10 +136,63 @@ void Image::build(Blueprint &blueprint) {
 						fileStream.seekg(segment.p_offset);
 						fileStream.read(reinterpret_cast<char *>(m_image.data() + physaddr - m_imageBase), segment.p_filesz);
 					}
+				} else if (segment.p_type == PT_DYNAMIC && info.type == ModuleType::ElfModule) {
+					writeMetadata32(MODINFO_METADATA | MODINFOMD_DYNAMIC, segment.p_vaddr);
 				}
 			}
 
+			std::vector<Elf32_Shdr> shdr(ehdr.e_shnum);
+			fileStream.seekg(ehdr.e_shoff);
+			fileStream.read(reinterpret_cast<char *>(shdr.data()), shdr.size() * sizeof(Elf32_Shdr));
+
+			writeMetadata(MODINFO_METADATA | MODINFOMD_SHDR, shdr.data(), shdr.size() * sizeof(Elf32_Shdr));
+
+			auto &sectionNameSection = shdr[ehdr.e_shstrndx];
+			std::vector<char> names(sectionNameSection.sh_size);
+			fileStream.seekg(sectionNameSection.sh_offset);
+			fileStream.read(names.data(), names.size());
+
+			for (size_t section = 0; section < ehdr.e_shnum; section++) {
+				if (strcmp(".ctors", names.data() + shdr[section].sh_name) == 0) {
+					auto &sec = shdr[section];
+
+					writeMetadata32(MODINFO_METADATA | MODINFOMD_CTORS_ADDR, sec.sh_addr);
+					writeMetadata32(MODINFO_METADATA | MODINFOMD_CTORS_SIZE, sec.sh_addr);
+
+					break;
+				}
+			}
+			
+			limit = (limit + 15) & ~15;
+
+			auto ssym = limit;
+			auto esym = limit;
+
+			for (const auto &section : shdr) {
+				if (section.sh_type == SHT_SYMTAB) {
+					bool doLoad = true;
+
+					for (const auto &segment : phdr) {
+						if (section.sh_offset >= segment.p_offset &&
+							(section.sh_offset + section.sh_size <= segment.p_offset + segment.p_filesz)) {
+
+							doLoad = false;
+							break;
+						}
+					}
+
+					if(doLoad)
+						writeSymbolSection(section, esym, shdr, fileStream);
+				}
+			}
+			
+			printf("%s symbol table: %08X - %08X\n", mod.name.c_str(), ssym, esym);
+
+			limit = esym;
 			size = limit - base;
+
+			writeMetadata32(MODINFO_METADATA | MODINFOMD_SSYM, ssym - m_kernelDelta);
+			writeMetadata32(MODINFO_METADATA | MODINFOMD_ESYM, esym - m_kernelDelta);
 		}
 		break;
 
@@ -124,7 +213,7 @@ void Image::build(Blueprint &blueprint) {
 
 		writeMetadata32(MODINFO_ADDR, base - m_kernelDelta);
 		writeMetadata32(MODINFO_SIZE, size);
-
+		
 		printf("%s module %s (from %s): starts at %08X, length %08X\n", mod.type.c_str(), mod.name.c_str(), mod.fileName.c_str(), base, size);
 
 		for (const auto &metadata : mod.metadata) {
@@ -547,5 +636,6 @@ void Image::writeElf(std::ostream &stream) {
 
 const std::unordered_map<std::string, Image::ModuleTypeInfo> Image::m_moduleTypes{
 	{ "elf kernel", { ModuleType::ElfKernel } },
+	{ "elf module", { ModuleType::ElfModule } },
 	{ "md_image", { ModuleType::Binary } }
 };

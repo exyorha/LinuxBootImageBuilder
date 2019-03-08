@@ -7,6 +7,8 @@
 
 class Blueprint;
 
+struct Elf32_Shdr;
+
 class Image {
 public:
 	Image();
@@ -23,6 +25,7 @@ public:
 private:
 	enum class ModuleType {
 		ElfKernel,
+		ElfModule,
 		Binary
 	};
 
@@ -38,7 +41,7 @@ private:
 	void writeMetadata(uint32_t type, const void *data, size_t dataSize);
 	void writeMetadata32(uint32_t type, uint32_t value);
 	void writeMetadataFixup(uint32_t type, std::function<void(uint8_t *data)> &&fixup, size_t length);
-	
+
 	void alignAllocationPointer(uint32_t alignment);
 
 	template<typename T>
@@ -47,6 +50,8 @@ private:
 	void loadExecutable(const std::string &executable, std::vector<unsigned char> &image, uint32_t &entry);
 
 	static const std::unordered_map<std::string, ModuleTypeInfo> m_moduleTypes;
+
+	void writeSymbolSection(const Elf32_Shdr &section, uint32_t &esym, const std::vector<Elf32_Shdr> &sections, std::istream &fileStream);
 
 	std::vector<uint32_t> m_metadata;
 	uint32_t m_imageBase;
