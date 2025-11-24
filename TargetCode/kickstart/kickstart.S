@@ -3,7 +3,7 @@
 .section .image_info, "a"
 .globl image_info
 image_info:
-	.long 0 @ Metadata base
+	.long 0 @ DTB base
 	.long 0 @ Kernel entry point
 	.long 0 @ Compressed data base
 	.long 0 @ Uncompressed data base
@@ -63,9 +63,16 @@ _start:
 	ldr r0, [r4, #8]
 	ldr r1, [r4, #12]
 	cmp r0, r1
-	blxne ulz4f
+	beq 1f
+	blx ulz4f
+1:
 
-	ldr r0, [r4, #0]
+	mov r0, #0
+	@ No machine type, DTB-only boot
+	mov r1, #0xFFFFFFFF
+	@ DTB base address
+	ldr r2, [r4, #0]
+
 	ldr pc, [r4, #4]
 .type _start,%function
 .size _start,. - _start

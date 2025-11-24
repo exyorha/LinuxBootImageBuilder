@@ -60,6 +60,8 @@ typedef uint32_t Elf32_Word;
 #define PF_W		2
 #define PF_R		4
 
+#define SHF_ALLOC 2
+
 #define SHT_NULL		0
 #define SHT_PROGBITS	1
 #define SHT_SYMTAB		2

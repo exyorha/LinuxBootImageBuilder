@@ -4,6 +4,9 @@
 #include "elf32.h"
 #include "lz4frame.h"
 #include "lz4hc.h"
+extern "C" {
+#include "libfdt.h"
+}
 
 #include <sstream>
 #include <fstream>
@@ -51,147 +54,113 @@ void Image::writeSymbolSection(const Elf32_Shdr &section, uint32_t &esym, const 
 
 }
 
+static void checkFDTResult(int result) {
+	if(result != 0)
+		throw std::runtime_error("libfdt error: " + std::string(fdt_strerror(result)));
+}
+
 void Image::build(Blueprint &blueprint) {
+	std::ifstream fileStream;
+	fileStream.exceptions(std::ios::failbit | std::ios::eofbit | std::ios::badbit);
+
 	m_imageBase = blueprint.imageBase;
 	m_allocationPointer = m_imageBase;
 	m_image.clear();
 
 	printf("Image base address: %08X\n", m_imageBase);
 
-	for (auto &mod : blueprint.modules) {
-		writeMetadata(MODINFO_NAME, mod.name.c_str(), mod.name.size() + 1);
-		writeMetadata(MODINFO_TYPE, mod.type.c_str(), mod.type.size() + 1);
+	if(!blueprint.dtb.has_value())
+		throw std::runtime_error("The DTB image must be specified to make a valid OS image");
 
-		auto infoIt = m_moduleTypes.find(mod.type);
-		if (infoIt == m_moduleTypes.end()) {
-			std::stringstream error;
-			error << "Unknown module type '" << mod.type << "'";
-			throw std::runtime_error(error.str());
+	fileStream.open(*blueprint.dtb, std::ios::in | std::ios::binary);
+
+	fileStream.seekg(0, std::ios::end);
+	auto dtbLength = size_t(fileStream.tellg());
+	fileStream.seekg(0);
+
+	m_fdt.resize(dtbLength + 8192);
+
+	fileStream.read(reinterpret_cast<char *>(m_fdt.data()), dtbLength);
+
+	fileStream.close();
+
+	checkFDTResult(fdt_open_into(m_fdt.data(), m_fdt.data(), m_fdt.size()));
+
+	if(!blueprint.kernel.has_value())
+		throw std::runtime_error("The kernel image must be specified to make a valid OS image");
+
+	alignAllocationPointer(0x00200000); // Kernel base must be aligned to 2MiB
+
+	fileStream.open(*blueprint.kernel, std::ios::in | std::ios::binary);
+
+	Elf32_Ehdr ehdr;
+	fileStream.read(reinterpret_cast<char *>(&ehdr), sizeof(ehdr));
+
+	uint32_t limit = m_allocationPointer;
+
+	if (memcmp(ehdr.e_ident, ElfIdentification, EI_PAD) != 0 ||
+		ehdr.e_type != ET_EXEC ||
+		ehdr.e_machine != EM_ARM ||
+		ehdr.e_version != EV_CURRENT ||
+		ehdr.e_phentsize != sizeof(Elf32_Phdr))
+		throw std::runtime_error("Bad ELF identification");
+
+	m_kernelEntryPoint = ehdr.e_entry;
+
+	std::vector<Elf32_Phdr> phdr(ehdr.e_phnum);
+
+	fileStream.seekg(ehdr.e_phoff);
+	fileStream.read(reinterpret_cast<char *>(phdr.data()), phdr.size() * sizeof(Elf32_Phdr));
+
+	for (const auto &segment : phdr) {
+		if (segment.p_type == PT_LOAD) {
+			if(!m_kernelDelta.has_value()) {
+				uint32_t alignedPaddr = segment.p_paddr & 0xffe00000;
+
+				printf("The kernel is linked for 0x%08X, the actual load address will be 0x%08X\n",
+					   alignedPaddr, m_allocationPointer);
+
+				m_kernelDelta.emplace(m_allocationPointer - alignedPaddr);
+			}
+
+			auto physaddr = segment.p_paddr + *m_kernelDelta;
+
+			printf("Segment vaddr: %08X, physaddr: %08X, remapped to: %08X\n", segment.p_vaddr, segment.p_paddr, physaddr);
+
+			limit = std::max<uint32_t>(limit, physaddr + segment.p_memsz);
+			if (m_image.size() < limit - m_imageBase) {
+				m_image.resize(limit - m_imageBase);
+			}
+
+			if (segment.p_filesz > 0) {
+				fileStream.seekg(segment.p_offset);
+				fileStream.read(reinterpret_cast<char *>(m_image.data() + physaddr - m_imageBase), segment.p_filesz);
+			}
 		}
+	}
 
-		auto &info = infoIt->second;
-		if (info.type == ModuleType::ElfKernel) {
-			alignAllocationPointer(0x00100000); // Kernel base must be aligned to 1MiB
-			m_kernelDelta = m_allocationPointer - KERNEL_VADDR;
-			printf("Kernel physical base: %08X, virtual base: %08X, delta: %08X\n", m_allocationPointer, KERNEL_VADDR, m_kernelDelta);
-		}
+	fileStream.close();
 
-		uint32_t base = m_allocationPointer;
-		uint32_t size;
+	m_allocationPointer = limit;
+	alignAllocationPointer(4096);
 
-		std::ifstream fileStream;
-		fileStream.exceptions(std::ios::failbit | std::ios::eofbit | std::ios::badbit);
-		fileStream.open(mod.fileName, std::ios::in | std::ios::binary);
+	// No modifications will be made to DTB now, copy it to the image.
 
-		switch (info.type) {
-		case ModuleType::ElfKernel:
-		case ModuleType::ElfModule:
-		{
-			Elf32_Ehdr ehdr;
-			fileStream.read(reinterpret_cast<char *>(&ehdr), sizeof(ehdr));
+	m_fdtBase = m_allocationPointer;
+	limit = m_allocationPointer + fdt_totalsize(m_fdt.data());
+	printf("FDT will be placed at 0x%08X, %u bytes in length\n", m_allocationPointer, limit - m_allocationPointer);
 
-			writeMetadata(MODINFO_METADATA | MODINFOMD_ELFHDR, &ehdr, sizeof(ehdr));
+	if (m_image.size() < limit - m_imageBase) {
+		m_image.resize(limit - m_imageBase);
+	}
 
-			uint32_t limit = base;
+	memcpy(m_image.data() + (m_allocationPointer - m_imageBase), m_fdt.data(), fdt_totalsize(m_fdt.data()));
 
-			if (memcmp(ehdr.e_ident, ElfIdentification, EI_PAD) != 0 ||
-				(info.type == ModuleType::ElfKernel && ehdr.e_type != ET_EXEC) ||
-				(info.type == ModuleType::ElfModule && ehdr.e_type != ET_DYN) ||
-				ehdr.e_machine != EM_ARM ||
-				ehdr.e_version != EV_CURRENT ||
-				ehdr.e_phentsize != sizeof(Elf32_Phdr))
-				throw std::runtime_error("Bad ELF identification");
+	m_allocationPointer = limit;
+	alignAllocationPointer(4096);
 
-			uint32_t virtualBaseDelta;
+#if 0
 
-			if (info.type == ModuleType::ElfKernel) {
-				m_kernelEntryPoint = ehdr.e_entry;
-				virtualBaseDelta = 0;
-			}
-			else {
-				virtualBaseDelta = base - m_kernelDelta;
-				printf("elf module %s will have virtual base address %08X and physical base address %08X\n",
-					mod.name.c_str(), virtualBaseDelta, base);
-			}
-
-			std::vector<Elf32_Phdr> phdr(ehdr.e_phnum);
-
-			fileStream.seekg(ehdr.e_phoff);
-			fileStream.read(reinterpret_cast<char *>(phdr.data()), phdr.size() * sizeof(Elf32_Phdr));
-
-			for (const auto &segment : phdr) {
-				if (segment.p_type == PT_LOAD) {
-					auto physaddr = segment.p_vaddr + virtualBaseDelta + m_kernelDelta;
-
-					printf("Segment physaddr: %08X, image base: %08X\n", physaddr, m_imageBase);
-
-					limit = std::max<uint32_t>(limit, physaddr + segment.p_memsz);
-					if (m_image.size() < limit - m_imageBase) {
-						m_image.resize(limit - m_imageBase);
-					}
-
-					if (segment.p_filesz > 0) {
-						fileStream.seekg(segment.p_offset);
-						fileStream.read(reinterpret_cast<char *>(m_image.data() + physaddr - m_imageBase), segment.p_filesz);
-					}
-				} else if (segment.p_type == PT_DYNAMIC && info.type == ModuleType::ElfModule) {
-					writeMetadata32(MODINFO_METADATA | MODINFOMD_DYNAMIC, segment.p_vaddr);
-				}
-			}
-
-			std::vector<Elf32_Shdr> shdr(ehdr.e_shnum);
-			fileStream.seekg(ehdr.e_shoff);
-			fileStream.read(reinterpret_cast<char *>(shdr.data()), shdr.size() * sizeof(Elf32_Shdr));
-
-			writeMetadata(MODINFO_METADATA | MODINFOMD_SHDR, shdr.data(), shdr.size() * sizeof(Elf32_Shdr));
-
-			auto &sectionNameSection = shdr[ehdr.e_shstrndx];
-			std::vector<char> names(sectionNameSection.sh_size);
-			fileStream.seekg(sectionNameSection.sh_offset);
-			fileStream.read(names.data(), names.size());
-
-			for (size_t section = 0; section < ehdr.e_shnum; section++) {
-				if (strcmp(".ctors", names.data() + shdr[section].sh_name) == 0) {
-					auto &sec = shdr[section];
-
-					writeMetadata32(MODINFO_METADATA | MODINFOMD_CTORS_ADDR, sec.sh_addr);
-					writeMetadata32(MODINFO_METADATA | MODINFOMD_CTORS_SIZE, sec.sh_addr);
-
-					break;
-				}
-			}
-			
-			limit = (limit + 15) & ~15;
-
-			auto ssym = limit;
-			auto esym = limit;
-
-			for (const auto &section : shdr) {
-				if (section.sh_type == SHT_SYMTAB) {
-					bool doLoad = true;
-
-					for (const auto &segment : phdr) {
-						if (section.sh_offset >= segment.p_offset &&
-							(section.sh_offset + section.sh_size <= segment.p_offset + segment.p_filesz)) {
-
-							doLoad = false;
-							break;
-						}
-					}
-
-					if(doLoad)
-						writeSymbolSection(section, esym, shdr, fileStream);
-				}
-			}
-			
-			printf("%s symbol table: %08X - %08X\n", mod.name.c_str(), ssym, esym);
-
-			limit = esym;
-			size = limit - base;
-
-			writeMetadata32(MODINFO_METADATA | MODINFOMD_SSYM, ssym - m_kernelDelta);
-			writeMetadata32(MODINFO_METADATA | MODINFOMD_ESYM, esym - m_kernelDelta);
-		}
 		break;
 
 		case ModuleType::Binary:
@@ -311,6 +280,7 @@ void Image::build(Blueprint &blueprint) {
 	for (const auto &fixup : m_metadataFixups) {
 		fixup.handler(reinterpret_cast<uint8_t *>(m_image.data() + m_metadataBase - m_imageBase + fixup.offset * sizeof(uint32_t)));
 	}
+#endif
 
 	if(blueprint.compress) {
 		std::vector<unsigned char> outputBuffer(m_image.size() + 4096);
@@ -389,14 +359,17 @@ void Image::build(Blueprint &blueprint) {
 		m_imageDisplacement = 0;
 	}
 
-	printf("Kickstart executable: %s\n", blueprint.kickstart.c_str());
+	if(!blueprint.kickstart.has_value())
+		throw std::runtime_error("the kickstart executable must be specified to build a valid boot image");
+
+	printf("Kickstart executable: %s\n", blueprint.kickstart->c_str());
 
 	m_kickstartBase = m_allocationPointer;
-	loadExecutable(blueprint.kickstart, m_kickstart, m_kickstartEntry);
+	loadExecutable(*blueprint.kickstart, m_kickstart, m_kickstartEntry);
 
 	auto kickstartInfo = reinterpret_cast<uint32_t *>(m_kickstart.data());
-	kickstartInfo[0] = m_metadataBase - m_kernelDelta;
-	kickstartInfo[1] = m_kernelEntryPoint + m_kernelDelta;
+	kickstartInfo[0] = m_fdtBase;
+	kickstartInfo[1] = m_kernelEntryPoint + *m_kernelDelta;
 	kickstartInfo[2] = m_imageBase + m_imageDisplacement;
 	kickstartInfo[3] = m_imageBase;
 
@@ -435,7 +408,6 @@ void Image::build(Blueprint &blueprint) {
 
 		reinterpret_cast<uint32_t *>(m_kickstart.data() + moduleTable - m_kickstartBase)[index] = 0;
 	}
-
 }
 
 void Image::loadExecutable(const std::string &executable, std::vector<unsigned char> &image, uint32_t &entry) {
@@ -490,6 +462,13 @@ void Image::loadExecutable(const std::string &executable, std::vector<unsigned c
 	fileStream.read(reinterpret_cast<char *>(shdr.data()), shdr.size() * sizeof(Elf32_Shdr));
 
 	for (const auto &section : shdr) {
+		if(section.sh_type != SHT_REL && section.sh_type != SHT_RELA)
+			continue;
+
+		auto &dest = shdr[section.sh_info];
+		if(!(dest.sh_flags & SHF_ALLOC))
+			continue;
+
 		if (section.sh_type == SHT_REL) {
 			if ((section.sh_entsize != sizeof(Elf32_Rel) || (section.sh_size % sizeof(Elf32_Rel)) != 0)) {
 				throw std::runtime_error("bad relocation section size");
@@ -498,6 +477,7 @@ void Image::loadExecutable(const std::string &executable, std::vector<unsigned c
 			std::vector<Elf32_Rel> relocations(section.sh_size / sizeof(Elf32_Rel));
 			fileStream.seekg(section.sh_offset);
 			fileStream.read(reinterpret_cast<char *>(relocations.data()), relocations.size() * sizeof(Elf32_Rel));
+			printf("%zu relocations\n", relocations.size());
 			processImageRelocations(image, base, relocations);
 		}
 		else if (section.sh_type == SHT_RELA) {
@@ -508,6 +488,7 @@ void Image::loadExecutable(const std::string &executable, std::vector<unsigned c
 			std::vector<Elf32_Rela> relocations(section.sh_size / sizeof(Elf32_Rela));
 			fileStream.seekg(section.sh_offset);
 			fileStream.read(reinterpret_cast<char *>(relocations.data()), relocations.size() * sizeof(Elf32_Rela));
+			printf("%zu relocations\n", relocations.size());
 			processImageRelocations(image, base, relocations);
 		}
 	}
@@ -541,37 +522,6 @@ void Image::processImageRelocations(std::vector<unsigned char> &image, uint32_t 
 		}
 		}
 	}
-}
-
-void Image::writeMetadata(uint32_t type, const void *data, size_t dataSize) {
-	auto words = (dataSize + 3) / 4;
-	m_metadata.reserve(m_metadata.size() + 2 + words);
-
-	m_metadata.push_back(type);
-	m_metadata.push_back(dataSize);
-
-	if (dataSize > 0) {
-		auto dataPos = m_metadata.size();
-		m_metadata.resize(dataPos + words);
-		memcpy(&m_metadata[dataPos], data, dataSize);
-	}
-}
-
-void Image::writeMetadataFixup(uint32_t type, std::function<void(uint8_t *data)> &&fixup, size_t dataSize) {
-	auto words = (dataSize + 3) / 4;
-	m_metadata.reserve(m_metadata.size() + 2 + words);
-
-	m_metadata.push_back(type);
-	m_metadata.push_back(dataSize);
-
-	if (dataSize > 0) {
-		m_metadataFixups.emplace_back(MetadataFixup{ m_metadata.size(), std::move(fixup) });
-		m_metadata.resize(m_metadata.size() + words);
-	}
-}
-
-void Image::writeMetadata32(uint32_t type, uint32_t value) {
-	writeMetadata(type, &value, sizeof(value));
 }
 
 void Image::alignAllocationPointer(uint32_t alignment) {
@@ -630,10 +580,3 @@ void Image::writeElf(std::ostream &stream) {
 	stream.seekp(kickstartPhdr.p_offset);
 	stream.write(reinterpret_cast<char *>(m_kickstart.data()), kickstartPhdr.p_filesz);
 }
-
-
-const std::unordered_map<std::string, Image::ModuleTypeInfo> Image::m_moduleTypes{
-	{ "elf kernel", { ModuleType::ElfKernel } },
-	{ "elf module", { ModuleType::ElfModule } },
-	{ "md_image", { ModuleType::Binary } }
-};
