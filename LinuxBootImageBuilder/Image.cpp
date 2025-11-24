@@ -1,6 +1,5 @@
 #include "Image.h"
 #include "Blueprint.h"
-#include "FreeBSDTypes.h"
 #include "elf32.h"
 #include "lz4frame.h"
 #include "lz4hc.h"
@@ -144,6 +143,44 @@ void Image::build(Blueprint &blueprint) {
 	m_allocationPointer = limit;
 	alignAllocationPointer(4096);
 
+	auto chosenNode = fdt_path_offset(m_fdt.data(), "/chosen");
+	if(chosenNode < 0)
+		checkFDTResult(-chosenNode);
+
+	if(blueprint.initramfs.has_value()) {
+		auto initramfsBase = m_allocationPointer;
+
+		fileStream.open(*blueprint.initramfs, std::ios::in | std::ios::binary);
+
+		fileStream.seekg(0, std::ios::end);
+		auto initramfsLength = size_t(fileStream.tellg());
+		fileStream.seekg(0);
+
+		limit = initramfsBase + initramfsLength;
+
+		if (m_image.size() < limit - m_imageBase) {
+			m_image.resize(limit - m_imageBase);
+		}
+
+		m_fdt.resize(dtbLength + 8192);
+
+		fileStream.read(reinterpret_cast<char *>(m_image.data() + initramfsBase - m_imageBase), initramfsLength);
+
+		fileStream.close();
+
+		m_allocationPointer = limit;
+		alignAllocationPointer(4096);
+
+		printf("Initamfs: at 0x%08X, %zu bytes in length\n", initramfsBase, initramfsLength);
+
+        checkFDTResult(fdt_setprop_u32(m_fdt.data(), chosenNode, "linux,initrd-start", (uint32_t)initramfsBase));
+        checkFDTResult(fdt_setprop_u32(m_fdt.data(), chosenNode, "linux,initrd-end", (uint32_t)(initramfsBase + initramfsLength)));
+
+	} else {
+		fdt_delprop(m_fdt.data(), chosenNode, "linux,initrd-start");
+		fdt_delprop(m_fdt.data(), chosenNode, "linux,initrd-end");
+	}
+
 	// No modifications will be made to DTB now, copy it to the image.
 
 	m_fdtBase = m_allocationPointer;
@@ -158,129 +195,6 @@ void Image::build(Blueprint &blueprint) {
 
 	m_allocationPointer = limit;
 	alignAllocationPointer(4096);
-
-#if 0
-
-		break;
-
-		case ModuleType::Binary:
-		{
-			fileStream.seekg(0, std::ios::end);
-			size = static_cast<uint32_t>(fileStream.tellg());
-			fileStream.seekg(0);
-
-			m_image.resize(base + size - m_imageBase);
-			fileStream.read(reinterpret_cast<char *>(m_image.data() + base - m_imageBase), size);
-		}
-		break;
-		}
-
-		m_allocationPointer = base + size;
-		alignAllocationPointer(4096);
-
-		writeMetadata32(MODINFO_ADDR, base - m_kernelDelta);
-		writeMetadata32(MODINFO_SIZE, size);
-		
-		printf("%s module %s (from %s): starts at %08X, length %08X\n", mod.type.c_str(), mod.name.c_str(), mod.fileName.c_str(), base, size);
-
-		for (const auto &metadata : mod.metadata) {
-			switch (metadata.type) {
-			case ModuleMetadataType::DTB:
-			{
-				uint32_t dtbBase = m_allocationPointer;
-
-				std::ifstream dtbStream;
-				dtbStream.exceptions(std::ios::badbit | std::ios::failbit | std::ios::eofbit);
-				dtbStream.open(metadata.singleValue, std::ios::in | std::ios::binary);
-				dtbStream.seekg(0, std::ios::end);
-				uint32_t dtbSize = static_cast<uint32_t>(dtbStream.tellg());
-				dtbStream.seekg(0);
-
-				printf("  DTB data: at %08X (virt %08X), size %08X\n", m_allocationPointer, m_allocationPointer - m_kernelDelta, dtbSize);
-
-				m_image.resize(dtbBase + dtbSize - m_imageBase);
-
-				dtbStream.read(reinterpret_cast<char *>(m_image.data() + dtbBase - m_imageBase), dtbSize);
-
-				m_allocationPointer += dtbSize;
-				alignAllocationPointer(4096);
-
-				writeMetadata32(MODINFO_METADATA | MODINFOMD_DTBP, dtbBase - m_kernelDelta);
-			}
-			break;
-
-			case ModuleMetadataType::KERNEND:
-				writeMetadataFixup(MODINFO_METADATA | MODINFOMD_KERNEND, [this](unsigned char *target) {
-					/*
-					 * Kernel end address is set in such way that the kernel, any modules, environment and metadata is preserved, but kickstart code is not.
-					 */
-
-					uint32_t value = m_allocationPointer - m_kernelDelta;
-
-					printf("Fixing up KERNEND: %08X\n", value);
-
-					memcpy(target, &value, sizeof(value));
-				}, sizeof(uint32_t));
-				break;
-
-			case ModuleMetadataType::ENVIRONMENT:
-			{
-				std::vector<char> environmentBlock;
-				for (const auto &variable : metadata.keyValuePairs) {
-					environmentBlock.insert(environmentBlock.end(), variable.first.begin(), variable.first.end());
-					environmentBlock.push_back('=');
-					environmentBlock.insert(environmentBlock.end(), variable.second.begin(), variable.second.end());
-					environmentBlock.push_back('\0');
-				}
-				environmentBlock.push_back('\0');
-
-				uint32_t envBase = m_allocationPointer;
-				uint32_t envSize = environmentBlock.size();
-
-				printf("  Environment: at %08X (virt %08X), size %08X\n", envBase, envBase - m_kernelDelta, envSize);
-
-				m_image.resize(envBase + envSize - m_imageBase);
-				memcpy(m_image.data() + envBase - m_imageBase, environmentBlock.data(), envSize);
-
-				m_allocationPointer += envSize;
-				alignAllocationPointer(4096);
-
-				writeMetadata32(MODINFO_METADATA | MODINFOMD_ENVP, envBase - m_kernelDelta);
-			}
-			break;
-
-			case ModuleMetadataType::HOWTO:
-				writeMetadata32(MODINFO_METADATA | MODINFOMD_HOWTO, std::stoul(metadata.singleValue));
-				break;
-			}
-		}
-	}
-
-	writeMetadata(MODINFO_END, nullptr, 0);
-
-	m_metadataBase = m_allocationPointer;
-	uint32_t metadataSize = m_metadata.size() * sizeof(uint32_t);
-
-	printf("Metadata: at %08X, size %08X\n", m_metadataBase, metadataSize);
-
-	m_image.resize(m_metadataBase + metadataSize - m_imageBase);
-	memcpy(m_image.data() + m_metadataBase - m_imageBase, m_metadata.data(), metadataSize);
-
-	m_allocationPointer += metadataSize;
-	alignAllocationPointer(4096);
-
-	m_image.resize(m_allocationPointer - m_imageBase); // Ensure proper zero padding at end
-
-	printf("End of uncompressed image: %08X\n", m_allocationPointer);
-
-	/*
-	 * Now that size of the uncompressed image is known, we can fix up relocations in the metadata.
-	 */
-
-	for (const auto &fixup : m_metadataFixups) {
-		fixup.handler(reinterpret_cast<uint8_t *>(m_image.data() + m_metadataBase - m_imageBase + fixup.offset * sizeof(uint32_t)));
-	}
-#endif
 
 	if(blueprint.compress) {
 		std::vector<unsigned char> outputBuffer(m_image.size() + 4096);
@@ -372,6 +286,8 @@ void Image::build(Blueprint &blueprint) {
 	kickstartInfo[1] = m_kernelEntryPoint + *m_kernelDelta;
 	kickstartInfo[2] = m_imageBase + m_imageDisplacement;
 	kickstartInfo[3] = m_imageBase;
+
+	printf("Final entry point: 0x%08X\n", m_kickstartEntry);
 }
 
 void Image::loadExecutable(const std::string &executable, std::vector<unsigned char> &image, uint32_t &entry) {

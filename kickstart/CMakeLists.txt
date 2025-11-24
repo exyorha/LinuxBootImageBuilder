@@ -1,3 +1,7 @@
+cmake_minimum_required(VERSION 3.12)
+project(kickstart)
+enable_language(ASM)
+
 add_executable(kickstart
   cache_init.S
   kickstart.S
@@ -13,3 +17,5 @@ set_target_properties(kickstart PROPERTIES LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_
 set_target_properties(kickstart PROPERTIES C_STANDARD 11)
 
 install(TARGETS kickstart EXPORT kickstart DESTINATION share/bsdbootimagebuilder)
+
+export(TARGETS kickstart FILE ${PROJECT_BINARY_DIR}/exports.cmake)
