@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <unordered_map>
 
-Blueprint::Blueprint() : compress(false) {
+Blueprint::Blueprint() : imageBase(UINT32_C(0x100000)), compress(false) {
 
 }
 

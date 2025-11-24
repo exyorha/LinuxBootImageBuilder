@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.12.1)
-project(BSDBootImageBuilder)
+project(LinuxBootImageBuilder)
 
 if(MSVC)
     SET(CMAKE_CXX_FLAGS "/EHsc")
 ENDIF(MSVC)
 
-add_subdirectory(BSDBootImageBuilder)
+add_subdirectory(LinuxBootImageBuilder)
 add_subdirectory(lz4)
 
-export(TARGETS BSDBootImageBuilder FILE ${PROJECT_BINARY_DIR}/exports.cmake)
+export(TARGETS LinuxBootImageBuilder FILE ${PROJECT_BINARY_DIR}/exports.cmake)

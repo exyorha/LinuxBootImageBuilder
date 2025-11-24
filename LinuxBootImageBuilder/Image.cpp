@@ -8,6 +8,8 @@
 #include <sstream>
 #include <fstream>
 #include <algorithm>
+#include <cstring>
+#include <memory>
 
 struct LZ4FDeleter {
 	inline void operator()(LZ4F_cctx *context) const {
@@ -25,13 +27,9 @@ static const uint8_t ElfIdentification[EI_NIDENT] = {
 	EV_CURRENT
 };
 
-Image::Image() {
+Image::Image() = default;
 
-}
-
-Image::~Image() {
-
-}
+Image::~Image() = default;
 
 void Image::writeSymbolSection(const Elf32_Shdr &section, uint32_t &esym, const std::vector<Elf32_Shdr> &sections, std::istream &fileStream) {
 	uint32_t size = section.sh_size;
@@ -382,7 +380,7 @@ void Image::build(Blueprint &blueprint) {
 
 		m_imageDisplacement = m_image.size() - outputBuffer.size();
 
-		printf("Compressed image at %08X, %08X bytes (%u%% of original)\n",
+		printf("Compressed image at %08X, %08zX bytes (%zu%% of original)\n",
 			m_imageBase + m_imageDisplacement,
 			outputBuffer.size(), outputBuffer.size() * 100 / m_image.size());
 
