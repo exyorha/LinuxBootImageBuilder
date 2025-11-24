@@ -372,42 +372,6 @@ void Image::build(Blueprint &blueprint) {
 	kickstartInfo[1] = m_kernelEntryPoint + *m_kernelDelta;
 	kickstartInfo[2] = m_imageBase + m_imageDisplacement;
 	kickstartInfo[3] = m_imageBase;
-
-	if (blueprint.initModules.empty()) {
-		kickstartInfo[4] = 0;
-	}
-	else {
-		alignAllocationPointer(4);
-
-		auto moduleTable = m_allocationPointer;
-		kickstartInfo[4] = moduleTable;
-
-		m_kickstart.resize(m_allocationPointer - m_kickstartBase + sizeof(uint32_t) * (blueprint.initModules.size() + 1));
-
-		m_allocationPointer += sizeof(uint32_t) * (blueprint.initModules.size() + 1);
-
-		size_t index = 0;
-		for (const auto &initModule : blueprint.initModules) {
-			std::vector<unsigned char> imageData;
-
-			alignAllocationPointer(8);
-			auto moduleBase = m_allocationPointer;
-			uint32_t imageEntry;
-			loadExecutable(initModule, imageData, imageEntry);
-
-			auto moduleLimit = m_allocationPointer;
-
-			printf("Module %s: at %08X, limit %08X, entry %08X\n", initModule.c_str(), moduleBase, moduleLimit, imageEntry);
-
-			m_kickstart.resize(moduleLimit - m_kickstartBase);
-			std::copy(imageData.begin(), imageData.end(), m_kickstart.begin() + (moduleBase - m_kickstartBase));
-
-			reinterpret_cast<uint32_t *>(m_kickstart.data() + moduleTable - m_kickstartBase)[index] = imageEntry;
-			index++;
-		}
-
-		reinterpret_cast<uint32_t *>(m_kickstart.data() + moduleTable - m_kickstartBase)[index] = 0;
-	}
 }
 
 void Image::loadExecutable(const std::string &executable, std::vector<unsigned char> &image, uint32_t &entry) {

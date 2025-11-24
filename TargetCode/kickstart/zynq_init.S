@@ -1,6 +1,6 @@
 .text
-.globl _start
-_start:
+.globl zynq_init
+zynq_init:
   mov  r5, #0x03
   mov  r6, #0
   ldr  r7, =0xF8000000    @ SLCR base address
@@ -31,5 +31,5 @@ do_remap:                 @ Unlock SLCR
 
   b enable_all_caches
 
-.type _start, %function
-.size _start, . - _start
+.type zynq_init, %function
+.size zynq_init, . - zynq_init

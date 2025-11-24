@@ -7,7 +7,6 @@ image_info:
 	.long 0 @ Kernel entry point
 	.long 0 @ Compressed data base
 	.long 0 @ Uncompressed data base
-	.long 0 @ Initialization chain
 .type image_info,%object
 .size image_info,. - image_info
 
@@ -41,22 +40,9 @@ _start:
 	orr     R1, R1, #0x00001000
 	mcr     p15, 0, R1, c1, c0, 0
 
+	blx 	zynq_init
+
 	ldr r4, =image_info
-
-	ldr	r5, [r4, #16]
-	cmp	r5, #0
-	beq	1f
-
-2:
-	ldr		r6, [r5], #4
-	cmp		r6, #0
-	beq		1f
-
-	push	{r4, r5}
-	blx		r6
-	pop		{r4, r5}
-
-1:
 
 	@ r0 - src
 	@ r1 - dst
@@ -66,6 +52,19 @@ _start:
 	beq 1f
 	blx ulz4f
 1:
+
+	MRC     p15, 0, r0, c1, c0, 0       @ Read CP15 System Control register
+  LDR     r1, =(0x1 << 12) | (0x1 <<  2) | 0x1 | (0x1 << 11)
+            @ Clear I bit 12 to disable I Cache
+            @ Clear C bit  2 to disable D Cache
+            @ Clear M bit  0 to disable MMU
+            @ Clear Z bit 11 to disable branch prediction
+  BIC     r0, r0, r1
+	MCR     p15, 0, r0, c1, c0, 0       @ Write value back to CP15 System Control register
+
+
+	blx clean_d_cache
+	@blx clean_invalidate_l2c
 
 	mov r0, #0
 	@ No machine type, DTB-only boot

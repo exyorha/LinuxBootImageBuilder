@@ -157,12 +157,6 @@ void Blueprint::processLine(std::vector<std::string> &&line) {
 		}
 
 		kickstart = std::move(*it++);
-	} else if(controlToken == "INIT") {
-		if (it == end) {
-			throw std::runtime_error("File name expected");
-		}
-
-		initModules.emplace_back(std::move(*it++));
 	} else if(controlToken == "COMPRESS") {
 		compress = true;
 	}

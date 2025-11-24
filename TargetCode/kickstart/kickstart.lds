@@ -20,4 +20,6 @@ SECTIONS {
 	.bss : {
 		*(.bss)
 	}
+
+	PROVIDE_HIDDEN(_end = .);
 }

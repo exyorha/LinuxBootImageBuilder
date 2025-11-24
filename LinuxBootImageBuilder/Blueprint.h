@@ -19,7 +19,6 @@ public:
 
 	uint32_t imageBase;
 	std::optional<std::string> kickstart;
-	std::vector<std::string> initModules;
 	std::optional<std::string> kernel;
 	std::optional<std::string> dtb;
 	std::optional<std::string> initramfs;
