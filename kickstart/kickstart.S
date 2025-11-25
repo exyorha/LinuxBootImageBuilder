@@ -56,7 +56,7 @@ _start:
 	ldr r3, [r4, #20]
 	cmp r0, r2
 	beq 1f
-	blx decompress_lzma
+	blx decompress_lzfse
 
 1:
 

@@ -1,8 +1,7 @@
 #include "Image.h"
-#include "7zTypes.h"
 #include "Blueprint.h"
 #include "elf32.h"
-#include "LzmaEnc.h"
+#include "lzfse.h"
 extern "C" {
 #include "libfdt.h"
 }
@@ -51,23 +50,6 @@ static void checkFDTResult(int result) {
 	if(result != 0)
 		throw std::runtime_error("libfdt error: " + std::string(fdt_strerror(result)));
 }
-
-static void *lzmaAlloc(ISzAllocPtr p, size_t size) {
-	(void)p;
-
-	return malloc(size);
-}
-
-static void lzmaFree(ISzAllocPtr p, void *address) {
-	(void)p;
-
-	free(address);
-}
-
-static const ISzAlloc lzmaAllocator = {
-	.Alloc = lzmaAlloc,
-	.Free = lzmaFree
-};
 
 void Image::build(Blueprint &blueprint) {
 	std::ifstream fileStream;
@@ -212,36 +194,32 @@ void Image::build(Blueprint &blueprint) {
 	unsigned int uncompressedLength = m_image.size();
 
 	if(blueprint.compress) {
-		std::vector<unsigned char> outputBuffer(LZMA_PROPS_SIZE + m_image.size());
-		size_t outputPropsSize = LZMA_PROPS_SIZE;
-		size_t outputBufferSize = outputBuffer.size() - LZMA_PROPS_SIZE;
+		auto scratch = std::make_unique<unsigned char[]>(lzfse_encode_scratch_size());
 
-		CLzmaEncProps props;
-		LzmaEncProps_Init(&props);
+		std::vector<unsigned char> outputBuffer(m_image.size());
 
-		auto encodeResult =
-			LzmaEncode(outputBuffer.data() + LZMA_PROPS_SIZE, &outputBufferSize, m_image.data(), m_image.size(), &props,
-					   outputBuffer.data(), &outputPropsSize, 1, nullptr, &lzmaAllocator, &lzmaAllocator);
+		size_t outputSize = lzfse_encode_buffer(outputBuffer.data(), outputBuffer.size(),
+							m_image.data(), m_image.size(),
+							scratch.get());
 
-		if(encodeResult == SZ_ERROR_OUTPUT_EOF) {
-			printf("The image is larger compressed than uncompressed, storing as is.\n");
-		} else if(encodeResult != SZ_OK) {
-			throw std::runtime_error("LZMA compression failed: " + std::to_string(encodeResult));
+		if(outputSize == 0) {
+			printf("The image is larger compressed than uncompressed, or has failed to compress. Storing as is.\n");
+		} else {
+
+			outputBuffer.resize(outputSize);
+
+			m_imageDisplacement = (m_image.size() + 4095) & ~4095;
+
+			printf("Compressed image at %08X, %08zX bytes (%zu%% of original)\n",
+				m_imageBase + m_imageDisplacement,
+				outputBuffer.size(), outputBuffer.size() * 100 / m_image.size());
+
+			m_image = std::move(outputBuffer);
+
+			m_allocationPointer = m_imageBase + m_imageDisplacement + m_image.size();
+
+			alignAllocationPointer(4096);
 		}
-
-		outputBuffer.resize(LZMA_PROPS_SIZE + outputBufferSize);
-
-		m_imageDisplacement = (m_image.size() + 4095) & ~4095;
-
-		printf("Compressed image at %08X, %08zX bytes (%zu%% of original)\n",
-			m_imageBase + m_imageDisplacement,
-			outputBuffer.size(), outputBuffer.size() * 100 / m_image.size());
-
-		m_image = std::move(outputBuffer);
-
-		m_allocationPointer = m_imageBase + m_imageDisplacement + m_image.size();
-
-		alignAllocationPointer(4096);
 
 	}
 
@@ -260,6 +238,11 @@ void Image::build(Blueprint &blueprint) {
 	kickstartInfo[3] = m_imageBase;
 	kickstartInfo[4] = m_image.size();
 	kickstartInfo[5] = uncompressedLength;
+
+	if(m_image.size() < m_allocationPointer - m_imageDisplacement - m_imageBase)
+		m_image.resize(m_allocationPointer  - m_imageDisplacement - m_imageBase);
+
+	memcpy(m_image.data() + m_kickstartBase - m_imageDisplacement  - m_imageBase, m_kickstart.data(), m_kickstart.size());
 
 	printf("Final entry point: 0x%08X\n", m_kickstartEntry);
 }
@@ -395,7 +378,7 @@ void Image::writeElf(const std::string &filename) {
 void Image::writeElf(std::ostream &stream) {
 	size_t dataPos = 4096;
 
-	std::vector<Elf32_Phdr> phdrs(2);
+	std::vector<Elf32_Phdr> phdrs(1);
 
 	auto &imagePhdr = phdrs[0];
 	imagePhdr.p_type = PT_LOAD;
@@ -406,18 +389,6 @@ void Image::writeElf(std::ostream &stream) {
 	imagePhdr.p_memsz = m_image.size();
 	imagePhdr.p_flags = PF_R | PF_W | PF_X;
 	imagePhdr.p_align = 4096;
-
-	dataPos += (imagePhdr.p_filesz + 4095) & ~4095;
-
-	auto &kickstartPhdr = phdrs[1];
-	kickstartPhdr.p_type = PT_LOAD;
-	kickstartPhdr.p_offset = dataPos;
-	kickstartPhdr.p_vaddr = m_kickstartBase;
-	kickstartPhdr.p_paddr = m_kickstartBase;
-	kickstartPhdr.p_filesz = m_kickstart.size();
-	kickstartPhdr.p_memsz = m_allocationPointer - m_kickstartBase;
-	kickstartPhdr.p_flags = PF_R | PF_W | PF_X;
-	kickstartPhdr.p_align = 4096;
 
 	Elf32_Ehdr ehdr;
 	memset(&ehdr, 0, sizeof(ehdr));
@@ -434,6 +405,4 @@ void Image::writeElf(std::ostream &stream) {
 	stream.write(reinterpret_cast<char *>(phdrs.data()), phdrs.size() * sizeof(Elf32_Phdr));
 	stream.seekp(imagePhdr.p_offset);
 	stream.write(reinterpret_cast<char *>(m_image.data()), imagePhdr.p_filesz);
-	stream.seekp(kickstartPhdr.p_offset);
-	stream.write(reinterpret_cast<char *>(m_kickstart.data()), kickstartPhdr.p_filesz);
 }
