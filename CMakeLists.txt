@@ -6,6 +6,5 @@ if(MSVC)
 ENDIF(MSVC)
 
 add_subdirectory(LinuxBootImageBuilder)
-add_subdirectory(lz4)
 
 export(TARGETS LinuxBootImageBuilder FILE ${PROJECT_BINARY_DIR}/exports.cmake)

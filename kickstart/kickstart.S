@@ -7,6 +7,8 @@ image_info:
 	.long 0 @ Kernel entry point
 	.long 0 @ Compressed data base
 	.long 0 @ Uncompressed data base
+	.long 0 @ Compressed length
+	.long 0 @ Uncompressed length
 .type image_info,%object
 .size image_info,. - image_info
 
@@ -45,12 +47,17 @@ _start:
 	ldr r4, =image_info
 
 	@ r0 - src
-	@ r1 - dst
+	@ r1 - src length
+	@ r2 - dst
+	@ r3 - dst length
 	ldr r0, [r4, #8]
-	ldr r1, [r4, #12]
-	cmp r0, r1
+	ldr r1, [r4, #16]
+	ldr r2, [r4, #12]
+	ldr r3, [r4, #20]
+	cmp r0, r2
 	beq 1f
-	blx ulz4f
+	blx decompress_lzma
+
 1:
 
 	MRC     p15, 0, r0, c1, c0, 0       @ Read CP15 System Control register
@@ -66,6 +73,7 @@ _start:
 	blx clean_d_cache
 	@blx clean_invalidate_l2c
 
+	ldr r4, =image_info
 	mov r0, #0
 	@ No machine type, DTB-only boot
 	mov r1, #0xFFFFFFFF

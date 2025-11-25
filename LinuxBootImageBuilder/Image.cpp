@@ -1,8 +1,8 @@
 #include "Image.h"
+#include "7zTypes.h"
 #include "Blueprint.h"
 #include "elf32.h"
-#include "lz4frame.h"
-#include "lz4hc.h"
+#include "LzmaEnc.h"
 extern "C" {
 #include "libfdt.h"
 }
@@ -12,12 +12,6 @@ extern "C" {
 #include <algorithm>
 #include <cstring>
 #include <memory>
-
-struct LZ4FDeleter {
-	inline void operator()(LZ4F_cctx *context) const {
-		LZ4F_freeCompressionContext(context);
-	}
-};
 
 static const uint8_t ElfIdentification[EI_NIDENT] = {
 	ELFMAG0,
@@ -57,6 +51,23 @@ static void checkFDTResult(int result) {
 	if(result != 0)
 		throw std::runtime_error("libfdt error: " + std::string(fdt_strerror(result)));
 }
+
+static void *lzmaAlloc(ISzAllocPtr p, size_t size) {
+	(void)p;
+
+	return malloc(size);
+}
+
+static void lzmaFree(ISzAllocPtr p, void *address) {
+	(void)p;
+
+	free(address);
+}
+
+static const ISzAlloc lzmaAllocator = {
+	.Alloc = lzmaAlloc,
+	.Free = lzmaFree
+};
 
 void Image::build(Blueprint &blueprint) {
 	std::ifstream fileStream;
@@ -196,81 +207,42 @@ void Image::build(Blueprint &blueprint) {
 	m_allocationPointer = limit;
 	alignAllocationPointer(4096);
 
+	m_imageDisplacement = 0;
+
+	unsigned int uncompressedLength = m_image.size();
+
 	if(blueprint.compress) {
-		std::vector<unsigned char> outputBuffer(m_image.size() + 4096);
-		size_t outputBufferUsed = 0;
+		std::vector<unsigned char> outputBuffer(LZMA_PROPS_SIZE + m_image.size());
+		size_t outputPropsSize = LZMA_PROPS_SIZE;
+		size_t outputBufferSize = outputBuffer.size() - LZMA_PROPS_SIZE;
 
-		{
-			LZ4F_cctx *rawCtx;
+		CLzmaEncProps props;
+		LzmaEncProps_Init(&props);
 
-			LZ4F_preferences_t prefs;
-			memset(&prefs, 0, sizeof(prefs));
-			prefs.frameInfo.blockMode = LZ4F_blockIndependent;
-			prefs.compressionLevel = LZ4HC_CLEVEL_MAX;
+		auto encodeResult =
+			LzmaEncode(outputBuffer.data() + LZMA_PROPS_SIZE, &outputBufferSize, m_image.data(), m_image.size(), &props,
+					   outputBuffer.data(), &outputPropsSize, 1, nullptr, &lzmaAllocator, &lzmaAllocator);
 
-			LZ4F_compressOptions_t opts;
-			memset(&opts, 0, sizeof(opts));
-			opts.stableSrc = 1;
-
-			if (LZ4F_createCompressionContext(&rawCtx, LZ4F_VERSION) != 0)
-				throw std::runtime_error("LZ4F_createCompressionContext failed");
-
-			std::unique_ptr<LZ4F_cctx, LZ4FDeleter> context(rawCtx);
-
-			auto chunk = LZ4F_compressBegin(
-				context.get(),
-				outputBuffer.data() + outputBufferUsed,
-				outputBuffer.size() - outputBufferUsed,
-				&prefs
-			);
-
-			if (LZ4F_isError(chunk)) {
-				throw std::runtime_error(LZ4F_getErrorName(chunk));
-			}
-
-			outputBufferUsed += chunk;
-
-			chunk = LZ4F_compressUpdate(
-				context.get(),
-				outputBuffer.data() + outputBufferUsed,
-				outputBuffer.size() - outputBufferUsed,
-				m_image.data(),
-				m_image.size(),
-				&opts
-			);
-
-			if (LZ4F_isError(chunk)) {
-				throw std::runtime_error(LZ4F_getErrorName(chunk));
-			}
-
-			outputBufferUsed += chunk;
-
-			chunk = LZ4F_compressEnd(
-				context.get(),
-				outputBuffer.data() + outputBufferUsed,
-				outputBuffer.size() - outputBufferUsed,
-				&opts
-			);
-
-			if (LZ4F_isError(chunk)) {
-				throw std::runtime_error(LZ4F_getErrorName(chunk));
-			}
-
-			outputBufferUsed += chunk;
-
+		if(encodeResult == SZ_ERROR_OUTPUT_EOF) {
+			printf("The image is larger compressed than uncompressed, storing as is.\n");
+		} else if(encodeResult != SZ_OK) {
+			throw std::runtime_error("LZMA compression failed: " + std::to_string(encodeResult));
 		}
 
-		outputBuffer.resize(outputBufferUsed);
+		outputBuffer.resize(LZMA_PROPS_SIZE + outputBufferSize);
 
-		m_imageDisplacement = m_image.size() - outputBuffer.size();
+		m_imageDisplacement = (m_image.size() + 4095) & ~4095;
 
 		printf("Compressed image at %08X, %08zX bytes (%zu%% of original)\n",
 			m_imageBase + m_imageDisplacement,
 			outputBuffer.size(), outputBuffer.size() * 100 / m_image.size());
 
 		m_image = std::move(outputBuffer);
-	} else {
-		m_imageDisplacement = 0;
+
+		m_allocationPointer = m_imageBase + m_imageDisplacement + m_image.size();
+
+		alignAllocationPointer(4096);
+
 	}
 
 	if(!blueprint.kickstart.has_value())
@@ -286,6 +258,8 @@ void Image::build(Blueprint &blueprint) {
 	kickstartInfo[1] = m_kernelEntryPoint + *m_kernelDelta;
 	kickstartInfo[2] = m_imageBase + m_imageDisplacement;
 	kickstartInfo[3] = m_imageBase;
+	kickstartInfo[4] = m_image.size();
+	kickstartInfo[5] = uncompressedLength;
 
 	printf("Final entry point: 0x%08X\n", m_kickstartEntry);
 }
@@ -382,6 +356,7 @@ void Image::processImageRelocations(std::vector<unsigned char> &image, uint32_t 
 	for (const auto &reloc : relocations) {
 		switch (ELF32_R_TYPE(reloc.r_info)) {
 		case R_ARM_ABS32:
+		case R_ARM_GOT32:
 			*reinterpret_cast<uint32_t *>(image.data() + reloc.r_offset) += base;
 			break;
 
@@ -389,6 +364,8 @@ void Image::processImageRelocations(std::vector<unsigned char> &image, uint32_t 
 		case R_ARM_REL32:
 		case R_ARM_CALL:
 		case R_ARM_JUMP24:
+		case R_ARM_GOTPC:
+		case R_ARM_V4BX:
 			break;
 
 		case R_ARM_PREL31:
