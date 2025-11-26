@@ -20,6 +20,7 @@ int main(int argc, char *argv[]) {
 		{ .name = "initramfs", .has_arg = required_argument },
 		{ .name = "kickstart", .has_arg = required_argument },
 		{ .name = "compress", .has_arg = optional_argument },
+		{ .name = "image-base", .has_arg = required_argument },
 		{ .name = nullptr }
 	};
 
@@ -53,6 +54,10 @@ int main(int argc, char *argv[]) {
 
 					case 5:
 						blueprint.compress = true;
+						break;
+
+					case 6:
+						blueprint.imageBase = strtoul(optarg, nullptr, 0);
 						break;
 
 				default:
