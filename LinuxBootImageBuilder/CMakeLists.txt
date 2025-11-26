@@ -1,5 +1,4 @@
 add_executable(LinuxBootImageBuilder
-	Blueprint.cpp
 	Blueprint.h
 	elf32.h
 	main.cpp
