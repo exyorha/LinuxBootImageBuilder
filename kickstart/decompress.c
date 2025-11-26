@@ -28,3 +28,9 @@ void *memset(void *dest, int c, size_t size) {
 
     return dest;
 }
+
+int raise(int sig) {
+    (void)sig;
+    while(1)
+        __asm__ __volatile__("bkpt #0");
+}
